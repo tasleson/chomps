@@ -177,6 +177,7 @@
     let score = 0;
     let lives = 3;
     let level = 1;
+    let runSeed = freshSeed();
     let gameState = 'ready';
     let powerTimer = 0;
     let enemyChain = 0;
@@ -234,7 +235,7 @@
     function buildGrid() {
       grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => '#'));
 
-      const rand = seededRandom(0x9e3779b9 ^ (level * 0x85ebca6b));
+      const rand = seededRandom(runSeed ^ (level * 0x85ebca6b));
       const nodeXs = [];
       const nodeYs = [];
       for (let x = 1; x < COLS - 1; x += 2) nodeXs.push(x);
@@ -311,6 +312,10 @@
         state = (state * 1664525 + 1013904223) >>> 0;
         return state / 4294967296;
       };
+    }
+
+    function freshSeed() {
+      return Math.floor(Math.random() * 0xffffffff) >>> 0;
     }
 
     function shuffle(items, rand) {
@@ -463,6 +468,7 @@
     }
 
     function resetGame() {
+      runSeed = freshSeed();
       score = 0;
       lives = 3;
       level = 1;
@@ -554,9 +560,9 @@
       }
       if (!map[event.code]) return;
       event.preventDefault();
+      if (gameState !== 'playing') return;
       ensureAudio();
       player.nextDir = dirByName[map[event.code]];
-      if (gameState === 'ready') startPlay();
     }
 
     function animate() {
@@ -582,9 +588,19 @@
         if (fruitTimer <= 0) removeFruit();
       }
 
+      captureCollisionStarts();
       updatePlayer(dt);
       enemies.forEach(e => updateEnemy(e, dt));
+      checkEnemyCollisions();
+      if (gameState !== 'playing') {
+        updateHud();
+        return;
+      }
       eatAtPlayerCell();
+      if (gameState !== 'playing') {
+        updateHud();
+        return;
+      }
       checkFruit();
       checkEnemyCollisions();
       updateHud();
@@ -714,13 +730,12 @@
       powerTimer = 0;
       enemyChain = 0;
       updateHud();
-      showOverlay('Caught in the glow. Ready for another life.', 'Resume');
+      showOverlay('Caught the glow. Ready for another life.', 'Resume');
     }
 
     function checkEnemyCollisions() {
       for (const enemy of enemies) {
-        const distance = player.mesh.position.distanceTo(enemy.mesh.position);
-        if (distance > 0.58) continue;
+        if (!entitiesCollide(player, enemy)) continue;
         if (enemy.eaten) continue;
         if (powerTimer > 0) {
           enemy.eaten = true;
@@ -733,6 +748,96 @@
         }
         break;
       }
+    }
+
+    function captureCollisionStarts() {
+      player.collisionStart = worldPoint2D(player.mesh.position);
+      enemies.forEach(enemy => {
+        enemy.collisionStart = worldPoint2D(enemy.mesh.position);
+      });
+    }
+
+    function entitiesCollide(a, b) {
+      const aNow = worldPoint2D(a.mesh.position);
+      const bNow = worldPoint2D(b.mesh.position);
+      if (distance2D(aNow, bNow) <= 0.72) return true;
+
+      const aStart = a.collisionStart || aNow;
+      const bStart = b.collisionStart || bNow;
+      if (
+        distance2D(aStart, aNow) <= 1.2 &&
+        distance2D(bStart, bNow) <= 1.2 &&
+        segmentDistance2D(aStart, aNow, bStart, bNow) <= 0.72
+      ) return true;
+      if (a.moving && b.moving && sameCell(a.from, b.to) && sameCell(a.to, b.from)) return true;
+
+      const aCells = collisionCells(a);
+      const bCells = collisionCells(b);
+      return aCells.some(aCell => bCells.some(bCell => sameCell(aCell, bCell)));
+    }
+
+    function collisionCells(entity) {
+      if (!entity.moving) return [entity.grid];
+      const cells = [];
+      if (entity.progress <= 0.65) cells.push(entity.from);
+      if (entity.progress >= 0.35) cells.push(entity.to);
+      return cells;
+    }
+
+    function worldPoint2D(position) {
+      return { x: position.x, y: position.z };
+    }
+
+    function distance2D(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    function segmentDistance2D(a1, a2, b1, b2) {
+      if (segmentsIntersect2D(a1, a2, b1, b2)) return 0;
+      return Math.min(
+        pointSegmentDistance2D(a1, b1, b2),
+        pointSegmentDistance2D(a2, b1, b2),
+        pointSegmentDistance2D(b1, a1, a2),
+        pointSegmentDistance2D(b2, a1, a2)
+      );
+    }
+
+    function pointSegmentDistance2D(point, a, b) {
+      const vx = b.x - a.x;
+      const vy = b.y - a.y;
+      const lenSq = vx * vx + vy * vy;
+      if (lenSq === 0) return distance2D(point, a);
+      const t = Math.max(0, Math.min(1, ((point.x - a.x) * vx + (point.y - a.y) * vy) / lenSq));
+      return distance2D(point, { x: a.x + vx * t, y: a.y + vy * t });
+    }
+
+    function segmentsIntersect2D(a, b, c, d) {
+      const o1 = orientation2D(a, b, c);
+      const o2 = orientation2D(a, b, d);
+      const o3 = orientation2D(c, d, a);
+      const o4 = orientation2D(c, d, b);
+      if (o1 !== o2 && o3 !== o4) return true;
+      return (
+        (o1 === 0 && pointOnSegment2D(c, a, b)) ||
+        (o2 === 0 && pointOnSegment2D(d, a, b)) ||
+        (o3 === 0 && pointOnSegment2D(a, c, d)) ||
+        (o4 === 0 && pointOnSegment2D(b, c, d))
+      );
+    }
+
+    function orientation2D(a, b, c) {
+      const value = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
+      if (Math.abs(value) < 0.00001) return 0;
+      return value > 0 ? 1 : 2;
+    }
+
+    function pointOnSegment2D(point, a, b) {
+      return (
+        point.x <= Math.max(a.x, b.x) + 0.00001 &&
+        point.x >= Math.min(a.x, b.x) - 0.00001 &&
+        point.y <= Math.max(a.y, b.y) + 0.00001 &&
+        point.y >= Math.min(a.y, b.y) - 0.00001
+      );
     }
 
     function spawnFruit() {
