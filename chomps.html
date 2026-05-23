@@ -146,6 +146,10 @@
     const FRUIT_SCORE = 500;
     const ENEMY_SCORE = 250;
     const PLAYER_SPEED = 5.8;
+    const PLAYER_CHOMP_DURATION = 0.5;
+    const PLAYER_CHOMP_MAX_FRACTION = 0.12;
+    const PLAYER_CHOMP_SEGMENTS = 18;
+    const BACKGROUND_COLOR = 0x02030a;
     const ENEMY_CHASE_SPEED = 3.85;
     const ENEMY_CHASE_LEVEL_GAIN = 0.28;
     const ENEMY_FRIGHTENED_SPEED = 2.05;
@@ -202,7 +206,7 @@
 
     function init() {
       scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x02030a);
+      scene.background = new THREE.Color(BACKGROUND_COLOR);
       camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
       camera.position.set(0, 28, 0);
       camera.up.set(0, 0, -1);
@@ -403,36 +407,127 @@
     function createPlayer() {
       const group = new THREE.Group();
       const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffdf31, emissive: 0xffa800, emissiveIntensity: 0.8, roughness: 0.38 });
-      const accentMat = new THREE.MeshStandardMaterial({ color: 0xff5ec7, emissive: 0xff2aa6, emissiveIntensity: 1.1 });
       const body = new THREE.Mesh(new THREE.SphereGeometry(0.38, 28, 16), bodyMat);
       body.scale.y = 0.72;
       body.position.y = 0.28;
       group.add(body);
-      const leftBow = triangleMesh([[-0.07, -0.38], [-0.34, -0.66], [-0.02, -0.68]], accentMat);
-      const rightBow = triangleMesh([[0.07, -0.38], [0.34, -0.66], [0.02, -0.68]], accentMat);
-      const knot = new THREE.Mesh(new THREE.SphereGeometry(0.08, 12, 8), accentMat);
-      knot.position.set(0, 0.48, -0.42);
-      group.add(leftBow, rightBow, knot);
+      const cutout = createPlayerCutout();
+      const eye = createPlayerEye();
+      group.add(cutout);
+      group.add(eye);
 
       const entity = makeEntity(group, 11, 19, PLAYER_SPEED);
+      entity.chompTime = 0;
+      entity.chompCutout = cutout;
+      entity.eye = eye;
       entity.dir = dirByName.left;
       entity.nextDir = dirByName.left;
       entity.targetRotationY = Math.PI / 2;
       entity.mesh.rotation.y = entity.targetRotationY;
+      updatePlayerEye(entity);
       positionEntity(entity);
       return entity;
     }
 
-    function triangleMesh(points, material) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute([
-        points[0][0], 0.48, points[0][1],
-        points[1][0], 0.48, points[1][1],
-        points[2][0], 0.48, points[2][1]
-      ], 3));
-      geo.setIndex([0, 1, 2]);
-      geo.computeVertexNormals();
-      return new THREE.Mesh(geo, material);
+    function createPlayerEye() {
+      const eye = new THREE.Mesh(
+        new THREE.CircleGeometry(0.065, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0x11151f,
+          side: THREE.DoubleSide,
+          depthTest: false,
+          depthWrite: false
+        })
+      );
+      eye.position.set(-0.12, 0.575, -0.2);
+      eye.rotation.x = -Math.PI / 2;
+      eye.renderOrder = 6;
+      return eye;
+    }
+
+    function updatePlayerEye(entity) {
+      if (!entity.eye || !entity.dir) return;
+      const positions = {
+        up: { x: 0.12, z: -0.2 },
+        right: { x: -0.12, z: -0.2 },
+        down: { x: -0.12, z: -0.2 },
+        left: { x: 0.12, z: -0.2 }
+      };
+      const position = positions[entity.dir.name] || positions.left;
+      entity.eye.position.x = position.x;
+      entity.eye.position.z = position.z;
+    }
+
+    function createPlayerCutout() {
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(PLAYER_CHOMP_SEGMENTS * 9);
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setDrawRange(0, 0);
+      const mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshBasicMaterial({
+          color: BACKGROUND_COLOR,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 1,
+          depthTest: false,
+          depthWrite: false
+        })
+      );
+      mesh.renderOrder = 5;
+      mesh.userData.positions = positions;
+      return mesh;
+    }
+
+    function updatePlayerCutout(entity, dt) {
+      if (!entity.chompCutout) return;
+      entity.chompCutout.rotation.y = normalizeAngle(entity.targetRotationY - entity.mesh.rotation.y);
+      if (!entity.moving) {
+        entity.chompTime = 0;
+        setPlayerCutoutAngle(entity.chompCutout, 0);
+        return;
+      }
+
+      entity.chompTime = (entity.chompTime + dt) % PLAYER_CHOMP_DURATION;
+      const phase = entity.chompTime / PLAYER_CHOMP_DURATION;
+      const openness = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+      setPlayerCutoutAngle(entity.chompCutout, Math.PI * 2 * PLAYER_CHOMP_MAX_FRACTION * openness);
+    }
+
+    function setPlayerCutoutAngle(mesh, angle) {
+      const geometry = mesh.geometry;
+      const positionAttr = geometry.getAttribute('position');
+      if (angle <= 0.0001) {
+        geometry.setDrawRange(0, 0);
+        positionAttr.needsUpdate = true;
+        return;
+      }
+
+      const radius = 0.42;
+      const lift = 0.565;
+      const centerAngle = -Math.PI / 2;
+      const segmentCount = Math.min(
+        PLAYER_CHOMP_SEGMENTS,
+        Math.max(1, Math.ceil((angle / (Math.PI * 2 * PLAYER_CHOMP_MAX_FRACTION)) * PLAYER_CHOMP_SEGMENTS))
+      );
+      const startAngle = centerAngle - angle / 2;
+      const positions = mesh.userData.positions;
+      let offset = 0;
+      for (let i = 0; i < segmentCount; i++) {
+        const a1 = startAngle + angle * (i / segmentCount);
+        const a2 = startAngle + angle * ((i + 1) / segmentCount);
+        positions[offset++] = 0;
+        positions[offset++] = lift;
+        positions[offset++] = 0;
+        positions[offset++] = Math.cos(a1) * radius;
+        positions[offset++] = lift;
+        positions[offset++] = Math.sin(a1) * radius;
+        positions[offset++] = Math.cos(a2) * radius;
+        positions[offset++] = lift;
+        positions[offset++] = Math.sin(a2) * radius;
+      }
+      geometry.setDrawRange(0, segmentCount * 3);
+      positionAttr.needsUpdate = true;
     }
 
     function createEnemy(name, x, y, color, behavior) {
@@ -525,6 +620,7 @@
       player.nextDir = dirByName.left;
       player.targetRotationY = Math.PI / 2;
       player.mesh.rotation.y = player.targetRotationY;
+      updatePlayerEye(player);
       positionEntity(player);
 
       enemies.forEach((e, index) => {
@@ -1033,6 +1129,7 @@
     function setPlayerFacing(dir) {
       const angles = { up: 0, right: -Math.PI / 2, down: Math.PI, left: Math.PI / 2 };
       player.targetRotationY = angles[dir.name] || 0;
+      updatePlayerEye(player);
     }
 
     function rotateTowardAngle(current, target, maxStep) {
@@ -1073,6 +1170,7 @@
         const s = 1 + Math.sin(now * 0.012) * 0.035;
         player.mesh.scale.set(s, 1, s);
         player.mesh.rotation.y = rotateTowardAngle(player.mesh.rotation.y, player.targetRotationY, dt * 14);
+        updatePlayerCutout(player, dt);
       }
       enemies.forEach((enemy, index) => {
         if (powerTimer > 0 && !enemy.eaten) {
